@@ -1,3 +1,4 @@
+// Package zseek provides a seekable compressed file.
 package zseek
 
 import (
@@ -40,26 +41,35 @@ type position struct {
 	phys, virt int64
 }
 
+// ZSeek is a seekable compressed file. The file is written in chunks of zlib-compressed
+// data prefixed with a 64-bit little endian integer representing the compressed size of
+// the chunk. ZSeek can only be used as an io.Writer if it is at the end of the file.
+// Attempting to write before reaching the end of the file will return ErrEarlyWrite.
 type ZSeek struct {
 	f     io.ReadWriteSeeker
 	read  bytes.Buffer
 	write bytes.Buffer
 	level int        // zlib compression level
 	idx   []position // both values are monotonically increasing
-	pos   position
-	end   position // physical position is always set; virtual position is -1 until known
-	buf   int      // max length of write before Flush is called automatically
-	err   error
+	pos   position   // current position
+	end   position   // physical position is always set; virt is -1 until known
+	buf   int        // max length of write before Flush is called automatically
+	err   error      // unrecoverable error
 }
 
+// New is equivalent to calling NewBuffer(f, DefaultCompression, DefaultBuffer).
 func New(f io.ReadWriteSeeker) (*ZSeek, error) {
 	return NewLevel(f, DefaultCompression)
 }
 
+// NewLevel is equivalent to calling NewBuffer(f, level, DefaultBuffer).
 func NewLevel(f io.ReadWriteSeeker, level int) (*ZSeek, error) {
 	return NewBuffer(f, level, DefaultBuffer)
 }
 
+// NewBuffer creates a *ZSeek with a specified buffer size for writing. Whenever there are
+// at least buf bytes of unwritten data during a Write call, Flush will automatically be
+// called.
 func NewBuffer(f io.ReadWriteSeeker, level, buf int) (*ZSeek, error) {
 	if buf <= 0 {
 		buf = DefaultBuffer
@@ -78,7 +88,8 @@ func NewBuffer(f io.ReadWriteSeeker, level, buf int) (*ZSeek, error) {
 	return &ZSeek{f: f, end: position{phys: end, virt: -1}, buf: buf, level: level}, nil
 }
 
-// Read implements io.Reader.
+// Read implements io.Reader. If a read would cross a chunk boundary, a partial read is done
+// instead. Use io.ReadFull to guarantee a full read.
 func (z *ZSeek) Read(p []byte) (n int, err error) {
 	if z.err != nil {
 		return 0, z.err
@@ -126,7 +137,7 @@ func (z *ZSeek) Write(p []byte) (n int, err error) {
 	return
 }
 
-// Seek implements io.Seeker.
+// Seek implements io.Seeker. Flush will be called before an attempt is made to seek.
 func (z *ZSeek) Seek(offset int64, whence int) (int64, error) {
 	err := z.Flush()
 	if err != nil {
@@ -237,7 +248,7 @@ func (z *ZSeek) skip(n int64) error {
 	return nil
 }
 
-// Flush writes any buffered data to the underlying io.ReadWriteSeeker. It is a no-op if
+// Flush writes any buffered data to the underlying io.ReadWriteSeeker. Flush is a no-op if
 // there is no data to be written.
 func (z *ZSeek) Flush() error {
 	if z.err != nil {
@@ -296,7 +307,8 @@ func (z *ZSeek) Flush() error {
 	return nil
 }
 
-// Close implements io.Closer. Close does not close the underlying io.ReadWriteSeeker.
+// Close implements io.Closer. Close does not close the underlying io.ReadWriteSeeker. After
+// Close is called, any action on z will return io.ErrClosedPipe.
 func (z *ZSeek) Close() error {
 	err := z.Flush()
 	z.err = io.ErrClosedPipe
